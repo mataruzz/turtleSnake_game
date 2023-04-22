@@ -6,7 +6,7 @@ This project consist in the implementation of the classic **Snake** game in the 
 The game use **turtlesim_node** and **turtle_teleop_key** node to controll the snake. As soon as the game start, a new turtle spawn, becoming the target to the snake. Once the snake reach the target, it will be moved to the tail of the snake, and a new turtle will be spawn. The game repeat undefinetly... but... stay away from the wall, or the snake will die.
 
 <div align="center">
-<img src="https://github.com/mataruzz/turtleSnake_game/blob/dev/turtleSnake_game.gif"> 
+<img src="https://github.com/mataruzz/turtleSnake_game/blob/Python/turtleSnake_game.gif"> 
   
 Gif speed: x3
 </div>
