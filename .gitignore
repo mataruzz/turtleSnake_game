@@ -1,0 +1,7 @@
+# Ignore the building folders
+devel
+build
+logs
+.catkin_tools
+.vscode
+
