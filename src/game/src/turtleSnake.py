@@ -35,6 +35,7 @@ class Turtle:
         rand_theta = random.uniform(0.0, 2*math.pi)
         spawn_new_turtle(rand_x, rand_y, rand_theta, self.name)
 
+        # We set the pose manually since the subscriber can require more time than the execution code
         self.pose.x = rand_x
         self.pose.y = rand_y
         self.pose.theta = rand_theta
