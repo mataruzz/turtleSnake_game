@@ -6,6 +6,7 @@
 #include <ctime>
 #include <random>
 #include <math.h>
+#include <typeinfo>
 
 #include "turtlesim/Pose.h"
 #include "turtlesim/Spawn.h"
@@ -17,29 +18,32 @@
 
 class Turtle{
     private:
-        ros::NodeHandle n;
+        ros::NodeHandle nh;
         ros::Subscriber sub;
+
     public:
-        std::string name;
         turtlesim::Pose pose;
+        std::string name;
         ros::Publisher pub;
+        bool activeSub;
 
-        Turtle(std::string turtleName){
+        Turtle(const std::string turtleName) {
             name = turtleName;
-            sub = n.subscribe("/"+name+"/pose", 100, &Turtle::updatePose, this);
-            pub = n.advertise<geometry_msgs::Twist>("/"+name+"/cmd_vel", 10);
+            sub = nh.subscribe("/"+name+"/pose", 100, &Turtle::updatePose , this);
+            pub = nh.advertise<geometry_msgs::Twist>("/"+name+"/cmd_vel", 10);
+            activeSub = false;
         }
-
 
         void updatePose(const turtlesim::Pose::ConstPtr& data)
         {
             this->pose = *data;
+            activeSub = true;
         }
 
         void setZeroPen()
         {
             turtlesim::SetPen srv;
-            ros::ServiceClient client = n.serviceClient<turtlesim::SetPen>("/"+name+"/set_pen");
+            ros::ServiceClient client = nh.serviceClient<turtlesim::SetPen>("/"+name+"/set_pen");
             client.waitForExistence();
 
             srv.request.off = 1;
@@ -53,7 +57,7 @@ class Turtle{
         void spawn()
         {
             turtlesim::Spawn srv;
-            ros::ServiceClient client = n.serviceClient<turtlesim::Spawn>("/spawn");
+            ros::ServiceClient client = nh.serviceClient<turtlesim::Spawn>("/spawn");
             client.waitForExistence();
             // Variables needed to create floats random numbers for the angle
             std::random_device rd;
@@ -80,13 +84,13 @@ class Turtle{
             std::cout << "Spawn new turtle: " << name << std::endl;
         }
 
-        void moveToEnd(const turtlesim::Pose frontTurtlePose)
+        void moveToEnd(turtlesim::Pose &frontTurtlePose)
         {
             float deltaX = 0.6;
             float deltaY = 0.6;
 
             turtlesim::TeleportAbsolute srv;
-            ros::ServiceClient client = n.serviceClient<turtlesim::TeleportAbsolute>("/"+name+"/teleport_absolute");
+            ros::ServiceClient client = nh.serviceClient<turtlesim::TeleportAbsolute>("/"+name+"/teleport_absolute");
             client.waitForExistence();
 
 
@@ -107,8 +111,6 @@ class Turtle{
         }
 };
 
-// Global variables
-std::vector<Turtle> turtles{};
 
 void changeBackground(float r=69, float g=86, float b=255)
 {
@@ -128,9 +130,8 @@ void changeBackground(float r=69, float g=86, float b=255)
     }
 }
 
-void resetGame()
+void resetGame(ros::NodeHandle &rg)
 {
-    ros::NodeHandle rg;
     ros::ServiceClient client = rg.serviceClient<std_srvs::Empty>("/reset");
     client.waitForExistence();
     std_srvs::Empty srv;
@@ -143,11 +144,11 @@ void resetGame()
     changeBackground();
 }
 
-bool isInsideArea(const turtlesim::Pose::ConstPtr& turtle1Pose,const turtlesim::Pose& turtle2Pose)
+bool isInsideArea(turtlesim::Pose*& turtle1Pose, turtlesim::Pose*& turtle2Pose)
 {
     float deltaX{0.5}, deltaY{0.5};
-    bool xCheck{turtle1Pose->x <= turtle2Pose.x + deltaX && turtle1Pose->x >= turtle2Pose.x - deltaX};
-    bool yCheck{turtle1Pose->y <= turtle2Pose.y + deltaY && turtle1Pose->y >= turtle2Pose.y - deltaY};
+    bool xCheck{turtle1Pose->x <= turtle2Pose->x + deltaX && turtle1Pose->x >= turtle2Pose->x - deltaX};
+    bool yCheck{turtle1Pose->y <= turtle2Pose->y + deltaY && turtle1Pose->y >= turtle2Pose->y - deltaY};
 
     if (xCheck && yCheck)
         return true;
@@ -156,26 +157,25 @@ bool isInsideArea(const turtlesim::Pose::ConstPtr& turtle1Pose,const turtlesim::
 
 }
 
-void stopSnake()
+void stopSnake(std::vector<std::unique_ptr<Turtle>> &turtles)
 {
     for (int i = 0; i < turtles.size()-1; i++)
     {
-        turtles.at(i).stopTurtle();
+        turtles.at(i)->stopTurtle();
     }
 }
 
-bool hitTheWall()
+bool hitTheWall(turtlesim::Pose*& headPose)
 {
     std::vector<float> xSize{0.0, 11.05}, ySize{0.0, 11.05};
-    
 
-    if (turtles.at(0).pose.x == xSize.at(0) || turtles.at(0).pose.x >= xSize.at(1) || turtles.at(0).pose.y == ySize.at(0) || turtles.at(0).pose.y >= ySize.at(1))
+    if (headPose->x == xSize.at(0) || headPose->x >= xSize.at(1) || headPose->y == ySize.at(0) || headPose->y >= ySize.at(1))
         return true;
     else
         return false;
 }
 
-void killSnake()
+void killSnake(std::vector<std::unique_ptr<Turtle>> &turtles)
 {
     ros::NodeHandle nh;
 
@@ -185,68 +185,96 @@ void killSnake()
     
     for (int i=turtles.size()-1; i>=0; i--)
     {   
-        srv.request.name = turtles.at(i).name;
+        srv.request.name = turtles.at(i)->name;
         if (!client.call(srv))
             ROS_ERROR("Failed to call service: /kill on %s", srv.request.name.c_str());
 
         ros::Duration(0.05).sleep();
-
     }
-
 }
 
-void callback(const turtlesim::Pose::ConstPtr& msg)
-{   
-    
-    turtles.at(0).pose = *msg;
-    turtlesim::Pose::ConstPtr head_pose{msg};
+void startGame(ros::NodeHandle &nh)
+{
+    int snakeLength = 0;
+    int maxLengthSnake = 200;
+    double deltaPos;
+    double angGoal;
+    double deltaAng;
     geometry_msgs::Twist newVel;
+    double freq{70}; // I decided to use a frequency of 70 because the subscriber subscribe with an average of 62Hz
+    ros::Rate rate(freq);
 
 
-    // if (isInsideArea(head_pose, turtles.back().pose))
-    // {
-    //     turtles.back().moveToEnd(turtles.at(turtles.size()-2).pose);
-        
-    //     // Turtle newTurtle("turtle" + std::to_string(turtles.size()+1));
-    //     // newTurtle.spawn();
-    //     // turtles.push_back(newTurtle); 
-    // }
+    /* Vector containing all the spawned turtles. I tried to create a simple vector made of Turtle object, but I faced a problem
+       where once instantiate the second object, the subscriber of the previous was dying, loosing the updation of the actual pose. */  
+    std::vector<std::unique_ptr<Turtle>> turtles;
 
-    // if (hitTheWall())
-    // {
-    //     changeBackground(255, 0, 0);
-    //     stopSnake();
-    //     killSnake();
+    turtles.emplace_back(std::make_unique<Turtle>("turtle1"));
+    turtles.back()->setZeroPen();
+    snakeLength = 1;
 
-    //     ROS_INFO("You hit the WALL!! You LOST :(");
-    //     ros::shutdown();
-    // }
+    turtles.emplace_back(std::make_unique<Turtle>("turtle2"));
+    turtles.back()->spawn();
+    // Here we do not increase snakeLength because the above turtle has been spawned, but it still not part of the snake itself
+    
+    // For better comprehension, saving the head pose as new name
+    turtlesim::Pose* headPose{&(turtles[0]->pose)};
 
-    if (turtles.size() > 1)
+    while (ros::ok())
     {
-        for (int i=1; i <= turtles.size()-1; i++) // only i < than
+        // Waiting the subscriber to be active
+        while (!turtles.at(0)->activeSub)
         {
-            float  deltaPos = sqrt(pow(turtles.at(i-1).pose.x - turtles.at(i).pose.x, 2) + pow(turtles.at(i-1).pose.y - turtles.at(i).pose.y, 2));
-            float angGoal = atan2(turtles.at(i-1).pose.y - turtles.at(i).pose.y, turtles.at(i-1).pose.x - turtles.at(i).pose.x);
-            float deltaAng = atan2(sin(angGoal - turtles.at(i).pose.theta), cos(angGoal - turtles.at(i).pose.theta));
-
-            std::cout << deltaPos << "," << angGoal << "," << deltaAng << std::endl;
-
-            if (deltaPos < 0.7)
-            {
-                newVel.linear.x = 0;
-                newVel.angular.z = 0;
-            }
-            else
-            {
-                newVel.linear.x = 3 * deltaPos;
-                newVel.angular.z = 8 * deltaAng;
-            }
-            std::cout << turtles.at(i).pose << std::endl;
-            std::cout << turtles.at(i-1).pose << std::endl;
-            turtles.at(i).pub.publish(newVel);
+            ros::spinOnce();
         }
-    }
+
+        turtlesim::Pose* targetTurtle{&(turtles.back()->pose)};
+
+        if (isInsideArea(headPose, targetTurtle))
+        {
+            turtles[snakeLength]->moveToEnd(turtles[snakeLength-1]->pose);
+            turtles.emplace_back(std::make_unique<Turtle>("turtle"+std::to_string(snakeLength+2)));
+            turtles.back()->spawn();
+            snakeLength += 1;
+        } 
+
+        if (hitTheWall(headPose))
+        {
+            changeBackground(255, 0, 0);
+            stopSnake(turtles);
+            killSnake(turtles);
+
+            ROS_INFO("You hit the WALL! You LOST :(");
+            ros::shutdown();
+        }
+
+        if (snakeLength > 1)
+        {
+            for(int i=1; i<snakeLength; i++)
+            {
+                deltaPos = sqrt(pow(turtles.at(i-1)->pose.x - turtles.at(i)->pose.x,2) + pow(turtles.at(i-1)->pose.y - turtles.at(i)->pose.y,2) );
+                angGoal = atan2(turtles.at(i-1)->pose.y - turtles.at(i)->pose.y, turtles.at(i-1)->pose.x - turtles.at(i)->pose.x);
+                deltaAng = atan2(sin(angGoal - turtles.at(i)->pose.theta), cos(angGoal - turtles.at(i)->pose.theta));
+
+                if (deltaPos < 0.7)
+                {
+                    newVel.linear.x = 0;
+                    newVel.angular.z = 0;
+                }
+                else
+                {
+                    int kl = 3;
+                    int ka = 15;
+                    newVel.linear.x = kl*deltaPos;
+                    newVel.angular.z = ka*deltaAng;
+                }
+                turtles.at(i)->pub.publish(newVel);
+            }
+        }
+
+        ros::spinOnce();
+        rate.sleep();
+    }   
 }
 
 
@@ -260,24 +288,6 @@ int main(int argc, char **argv)
     ros::NodeHandle nh;
 
     // Resetting the board as default settings
-    resetGame();
-    Turtle turtle1("turtle1");
-    turtle1.setZeroPen();
-    turtles.push_back(turtle1);
-
-    Turtle turtle2("turtle2");
-    turtle2.spawn();
-    turtles.push_back(turtle2);
-    
-    // for (int i=3; i <= 3; i++)
-    // {
-    //     Turtle turtle2("turtle"+std::to_string(i));
-    //     turtle2.spawn();
-    //     turtles.push_back(turtle2);
-    // }
-
-    ros::Subscriber game = nh.subscribe<turtlesim::Pose>("/turtle1/pose", 10, callback);
-    
-    ros::spin();
-
+    resetGame(nh);
+    startGame(nh);
 }
